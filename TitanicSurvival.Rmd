@@ -11,10 +11,49 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r librabry}
 library(data.table)
+library(tidyr)
+library(reshape2)
+library(ggplot2)
 ```
 ## Initialization
 ```{r init, cache = T}
-trainDt <- fread("train.csv", sep = ",", header = T)
-testDt <- fread("test.csv", sep = ",", header = T)
-genderDt <- fread("gender_submission.csv", sep = ",", header = T)
+trainDt <- fread("train.csv", sep = ",", header = T, na.strings = "")
+testDt <- fread("test.csv", sep = ",", header = T, na.strings = "")
+genderDt <- fread("gender_submission.csv",
+                  sep = ",",
+                  header = T,
+                  na.strings = "")
+```
+
+```{r functions, cache = T}
+normalize <- function(x) {
+    return ((x - min(x)) / (max(x) - min(x)))
+  }
+```
+
+```{r tidyData}
+testDt <- merge(testDt, genderDt)
+testDt[, Cabin := sapply(strsplit(as.character(Cabin),
+                                  " "),
+                         function(x) (x[1]))]
+testDt <- separate(testDt, Cabin, c("CabinLetter", "CabinNumber"), 1)
+testDt[, `:=` (Sex = as.factor(Sex),
+               CabinLetter = as.factor(CabinLetter),
+               Embarked = as.factor(Embarked),
+               CabinNumber = as.integer(CabinNumber),
+               Ticket = NULL,
+               Name = NULL)]
+testLevels <- sapply(testDt[, list(Sex, CabinLetter, Embarked)], levels)
+testDt[, `:=` (Sex = as.numeric(Sex),
+               CabinLetter = as.numeric(CabinLetter),
+               Embarked = as.numeric(Embarked))]
+testDt[, `:=` (CabinLetter = NULL, CabinNumber = NULL)]
+corMat <- melt(cor(testDt[complete.cases(Age, Fare)]))
+ggplot(corMat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+```
+
+```{r learning}
+testDt <- as.data.table(sapply(testDt[complete.cases(Age, Fare)], normalize))
+
 ```
