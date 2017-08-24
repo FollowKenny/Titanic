@@ -1,3 +1,4 @@
-./test.csv
-./train.csv
-./gender_submission.csv
+test.csv
+train.csv
+gender_submission.csv
+TitanicSurvival_cache/
