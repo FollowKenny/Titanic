@@ -9,21 +9,179 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r librabry}
+```{r librabry, echo = FALSE}
 library(data.table)
 library(tidyr)
 library(reshape2)
 library(ggplot2)
+library(class)
 ```
-## Initialization
+## Get familiar with the dataset
+
+Of course we want to read the data and put it in a structure so we can
+start our analysis. Here we chose a data.table, which is, to keep it simple, an
+enhanced data.frame. If you are interested, I'm sure you will succeed in finding
+more on your own (Google).
+
 ```{r init, cache = T}
-trainDt <- fread("train.csv", sep = ",", header = T, na.strings = "")
-testDt <- fread("test.csv", sep = ",", header = T, na.strings = "")
-genderDt <- fread("gender_submission.csv",
-                  sep = ",",
-                  header = T,
-                  na.strings = "")
+trainDt <- fread("train.csv", sep = ",", header = T,
+                 na.strings = "", stringsAsFactors = T)
+testDt <- fread("test.csv", sep = ",", header = T,
+                na.strings = "", stringsAsFactors = T)
+wholeDt <- rbind(trainDt, testDt, fill = T)
 ```
+
+Now that we have all our data in one data.table, let's take a peek at it
+```{r printData}
+wholeDt
+summary(wholeDt)
+```
+
+What are the remarkable features ? First, we see that some variables have missing
+values. This is going to be quite a problem so we will deal with it later.
+Second, some variables, namely Name, Ticket and Cabin, seems to contain more
+than one information. Our first task will be to transform the data so we can use
+this information.
+
+## Transform the data
+For this we will use the tidyr package. Let's get started.
+### Name
+```{r transformName}
+wholeDt <- separate(wholeDt,
+                     Name,
+                     c('Family', 'Title'),
+                     ", ")
+wholeDt[, `:=` (Title = as.factor(gsub("\\..*", "", Title)),
+                Family = as.factor(Family))]
+head(wholeDt, 2)
+```
+
+We splitted the Name column into the Family and Title column. In the process we
+discarded passengers first names as we can't see how being named Francis would 
+ber relevant to our survival on the Titanic. We might be wrong though... Now one
+can notice that we might have duplicate on those two column, like a father and
+his son but the remaining variables hold plenty of information to distinct them.
+
+This leaves us with two factor variables that might be related to survival. The
+Family one is tricky so let's start with the Title one.
+```{r peekTitle}
+table(wholeDt$Title)
+```
+Those factors are not satisfying as some are pretty much the same and some are
+too rare to be of any use. So we are going to regroup Don, Dona, Jonkheer, Lady,
+Sir and Countess into a Noble factor, Col, Capt, Dr, Major and Rev into
+Honorific and finally reassign Ms and Mlle to Miss and Mme to Mrs.
+```{r changeTitle}
+nobles <- c("Don", "Dona", "Jonkheer", "Lady", "Sir","the Countess")
+honorifics <- c("Col", "Capt", "Dr", "Major", "Rev")
+intoMiss <- c("Ms", "Mlle")
+intoMrs <- c("Mme")
+wholeDt[Title %in% intoMiss , Title := "Miss"]
+wholeDt[Title %in% intoMrs, Title := "Mrs"]
+wholeDt[Title %in% nobles, Title := "Noble"]
+wholeDt[Title %in% honorifics, Title := "Honorific"]
+wholeDt[, Title := droplevels(Title)]
+```
+Now we are good with this Title variable. We still have a tricky problem with
+our Family variable. Can you guess it ?
+
+What if two family have the same last name ? There won't be a reliable way to
+distinct them. There are also cases where different member of the same family
+don't share the same family name, a maried sister for example. 
+Let's create a family count and hopefully both variable will contain enough
+information. Their is room for amelioration here, for example by getting the
+maried women maiden name.
+```{r createFamilyCount, warnings = FALSE, message = FALSE}
+wholeDt[, FamilyCount := SibSp + Parch + 1]
+```
+
+### Cabin
+This one is easier we just want to split the Cabin letter and number as it is
+probably related to a position on the boat. Some Cabin values contain more than
+one Cabin, we'll just take the first one as the other are closely related.
+
+```{r changeCabin}
+wholeDt[, Cabin := sapply(strsplit(as.character(Cabin),
+                                  " "),
+                         function(x) (x[1]))]
+wholeDt <- separate(wholeDt, Cabin, c("CabinLetter", "CabinNumber"), 1)
+wholeDt[CabinNumber == "", CabinNumber := NA]
+wholeDt[,`:=` (CabinLetter = as.factor(CabinLetter),
+               CabinNumber = as.integer(CabinNumber))]
+```
+
+### Ticket
+There might be some information here but it is probably redundant with other
+variables so we will dismiss this variable `r wholeDt[, Ticket := NULL]`. We are
+left with our missing value issue
+
+## Missing value
+Let's find out which variables have missing value and how much are missing. 
+```{r NAcols}
+colSums(is.na(wholeDt))
+```
+
+Our 418 Survived missing value are perfectly normal as we are trying to guess
+those. 
+### Fare
+Passenger 1044 Fare is missing, we will try to input it based on other variables
+value. It is probably safe to assume Fare is related to Pclass and maybe to
+Embarked. Let's confirm that with a heatmap.
+
+```{r fareCor}
+fareCorMat <- as.data.table(
+  melt(
+    cor(sapply(
+      wholeDt[complete.cases(Age,
+                             Fare,
+                             Embarked) & Age > 30,
+              -c("Survived","CabinLetter", "CabinNumber"),
+              with = FALSE],
+      as.numeric))))
+ggplot(fareCorMat[], aes(x=Var1, y=Var2, fill=value)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab",
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+  geom_tile(color = "white")
+```
+
+Since Cabin and Survived information are missing for this passenger we excluded
+it from the heatmap. We can see that as we supposed Pclass and Embarked do
+influence Fare but Sex, Age and having a Family also does. Let's look at the
+Fare distibution for a related population
+```{r fareDistribution}
+ggplot(wholeDt[Sex == "male" &
+                 Pclass == 3 &
+                 Embarked == "S" &
+                 FamilyCount == 1 &
+                 !is.na(Fare)],
+       aes(Fare)) +
+  geom_density(fill = "green", alpha=0.1) +
+  geom_vline(
+    aes(xintercept = median(Fare, na.rm=T)),
+    colour='red',
+    linetype='dashed')
+wholeDt[PassengerId == 1044, Fare := wholeDt[Sex == "male" &
+                                               Pclass == 3 &
+                                               Embarked == "S" &
+                                               FamilyCount == 1,
+                                             median(Fare, na.rm=T)]]
+```
+
+Judging from this distribution it is safe to input the median value computed as
+Fare value for our Passenger 1044. 
+
+testLevels <- sapply(trainDt[, list(Sex, CabinLetter, Embarked)], levels)
+trainDt[, `:=` (Sex = as.numeric(Sex),
+               CabinLetter = as.numeric(CabinLetter),
+               Embarked = as.numeric(Embarked))]
+trainDt[, `:=` (CabinLetter = NULL, CabinNumber = NULL)]
+corMat <- melt(cor(trainDt[complete.cases(Age, Fare, Embarked)]))
+ggplot(corMat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+
 
 ```{r functions, cache = T}
 normalize <- function(x) {
@@ -31,29 +189,9 @@ normalize <- function(x) {
   }
 ```
 
-```{r tidyData}
-testDt <- merge(testDt, genderDt)
-testDt[, Cabin := sapply(strsplit(as.character(Cabin),
-                                  " "),
-                         function(x) (x[1]))]
-testDt <- separate(testDt, Cabin, c("CabinLetter", "CabinNumber"), 1)
-testDt[, `:=` (Sex = as.factor(Sex),
-               CabinLetter = as.factor(CabinLetter),
-               Embarked = as.factor(Embarked),
-               CabinNumber = as.integer(CabinNumber),
-               Ticket = NULL,
-               Name = NULL)]
-testLevels <- sapply(testDt[, list(Sex, CabinLetter, Embarked)], levels)
-testDt[, `:=` (Sex = as.numeric(Sex),
-               CabinLetter = as.numeric(CabinLetter),
-               Embarked = as.numeric(Embarked))]
-testDt[, `:=` (CabinLetter = NULL, CabinNumber = NULL)]
-corMat <- melt(cor(testDt[complete.cases(Age, Fare)]))
-ggplot(corMat, aes(x=Var1, y=Var2, fill=value)) + 
-  geom_tile()
-```
 
 ```{r learning}
-testDt <- as.data.table(sapply(testDt[complete.cases(Age, Fare)], normalize))
-
+#trainDt <- as.data.table(sapply(trainDt[complete.cases(Age, Fare, Embarked)], normalize))
+#testDt <- as.data.table(sapply(testDt, normalize))
+#predSurv <- knn(train = trainDt, test = testDt, cl = trainDt[, Survived], k = round(sqrt(nrow(trainDt))))
 ```
