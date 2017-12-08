@@ -15,6 +15,8 @@ library(tidyr)
 library(reshape2)
 library(ggplot2)
 library(class)
+library(mice)
+library(VIM)
 ```
 ## Get familiar with the dataset
 
@@ -111,9 +113,12 @@ wholeDt[,`:=` (CabinLetter = as.factor(CabinLetter),
 ```
 
 ### Ticket
-There might be some information here but it is probably redundant with other
-variables so we will dismiss this variable `r wholeDt[, Ticket := NULL]`. We are
-left with our missing value issue
+From this variable it might be interesting to know how many people share the
+same ticket. To do this we will create a new column TicketShare which will
+contain this total number of people.
+```{r TicketShare}
+wholeDt[, TicketShare := .N, by = Ticket]
+```
 
 ## Missing value
 Let's find out which variables have missing value and how much are missing. 
@@ -139,12 +144,12 @@ fareCorMat <- as.data.table(
               with = FALSE],
       as.numeric))))
 ggplot(fareCorMat[], aes(x=Var1, y=Var2, fill=value)) + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
   scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
    midpoint = 0, limit = c(-1,1), space = "Lab",
    name="Pearson\nCorrelation") +
   theme_minimal()+ 
-  geom_tile(color = "white")
+  geom_tile(color = "white") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
 Since Cabin and Survived information are missing for this passenger we excluded
@@ -156,9 +161,10 @@ ggplot(wholeDt[Sex == "male" &
                  Pclass == 3 &
                  Embarked == "S" &
                  FamilyCount == 1 &
+                 TicketShare == 1 &
                  !is.na(Fare)],
        aes(Fare)) +
-  geom_density(fill = "green", alpha=0.1) +
+  geom_density(fill = "green", alpha=0.5) +
   geom_vline(
     aes(xintercept = median(Fare, na.rm=T)),
     colour='red',
@@ -171,7 +177,59 @@ wholeDt[PassengerId == 1044, Fare := wholeDt[Sex == "male" &
 ```
 
 Judging from this distribution it is safe to input the median value computed as
-Fare value for our Passenger 1044. 
+Fare value for our Passenger 1044. As you can see we left out the age variable
+even though it is impacting, but we don't have enough data for eldery people in
+this group.
+
+### Embarked
+```{r checkEmbarkedNA}
+wholeDt[is.na(Embarked)]
+```
+These two have the same ticket number so it is likely that they boarded in the 
+same place. Let's look at tickets to see if tickets alike all boarded in the 
+same place also.
+
+```{r checkSimilarTicket}
+wholeDt[Ticket %like% 1135]
+```
+So it seems our Passenger boarded either in C or in S. Let's get deeper into
+analyse like we did for Fare. But in this case all other data are filled.
+
+```{r ticketCor}
+ticketCorMat <- as.data.table(
+  melt(
+    cor(sapply(
+      wholeDt[complete.cases(Age,
+                             Ticket,
+                             Embarked),
+              -c("Survived","CabinLetter", "CabinNumber"),
+              with = FALSE],
+      as.numeric))))
+ggplot(ticketCorMat[], aes(x=Var1, y=Var2, fill=value)) + 
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab",
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+  geom_tile(color = "white") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+As we could expect, Embarked depends mainly on Pclass and Fare and more lightly
+on Sex. Let's look at related Passengers in those terms then.
+
+```{r relatedEmbarked}
+ggplot(wholeDt[Sex == "female" &
+                 Pclass == 1 &
+                 TicketShare == 2 &
+                 !is.na(Embarked)],
+       aes(Embarked, Fare)) +
+  geom_boxplot()
+wholeDt[is.na(Embarked), Embarked := C]
+```
+Looking at this boxplot, we can input the Embarked value with C as it fits best.
+Once again we are left with the most difficult, Age and heavily missing Cabin
+features. Let's user mice for that.
+
+### Age and Cabin with mice
 
 testLevels <- sapply(trainDt[, list(Sex, CabinLetter, Embarked)], levels)
 trainDt[, `:=` (Sex = as.numeric(Sex),
